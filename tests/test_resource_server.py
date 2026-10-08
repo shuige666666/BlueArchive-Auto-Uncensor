@@ -1,4 +1,4 @@
-"""验证模拟器测试服务的补丁优先、官方回源和断点下载。"""
+"""验证资源服务的补丁优先、CDN 跳转、兼容回源和断点下载。"""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,7 +24,7 @@ class ResourceServerTests(unittest.TestCase):
             byte_range("bytes=6-", 6)
 
     def test_patch_priority_fallback_head_and_traversal(self):
-        """真实 HTTP 请求应命中补丁、转发缺失资源，并拒绝目录越界。"""
+        """真实 HTTP 请求验证补丁、回源与 CDN 跳转，并拒绝目录越界。"""
         calls = []
 
         class OfficialHandler(BaseHTTPRequestHandler):
@@ -56,7 +56,7 @@ class ResourceServerTests(unittest.TestCase):
                 official_thread.start()
                 upstream = f"http://127.0.0.1:{official.server_port}/prodm39"
                 try:
-                    with ResourceServer(("127.0.0.1", 0), Path(directory), upstream) as server:
+                    with ResourceServer(("127.0.0.1", 0), Path(directory), upstream, stream_official=True) as server:
                         server.history = [(old, upstream)]
                         thread = Thread(target=server.serve_forever, daemon=True)
                         thread.start()
@@ -82,6 +82,24 @@ class ResourceServerTests(unittest.TestCase):
                                 response = session.get(root + "/AssetBundles/Android/removed.bundle", timeout=5)
                                 self.assertEqual(response.content, b"official")
                                 self.assertEqual(response.headers["X-Resource-Source"], "official")
+                                # 默认跳转不经过服务回源，跟随跳转仍应保留断点和查询参数。
+                                server.stream_official = False
+                                calls.clear()
+                                redirect_path = root + "/AssetBundles/other.bundle?q=1"
+                                response = session.get(redirect_path, allow_redirects=False, timeout=5)
+                                self.assertEqual(response.status_code, 302)
+                                self.assertEqual(response.headers["Location"], upstream + "/AssetBundles/other.bundle?q=1")
+                                self.assertEqual(response.content, b"")
+                                self.assertFalse(calls)
+                                response = session.head(redirect_path, allow_redirects=False, timeout=5)
+                                self.assertEqual(response.status_code, 302)
+                                self.assertEqual(response.headers["Content-Length"], "0")
+                                response = session.get(redirect_path, headers={"Range": "bytes=2-"}, timeout=5)
+                                self.assertEqual(response.content, b"official")
+                                self.assertEqual(calls, [("/prodm39/AssetBundles/other.bundle?q=1", "bytes=2-")])
+                                response = session.get(root + "/AssetBundles/test.bundle", timeout=5)
+                                self.assertEqual(response.content, b"patched")
+                                self.assertEqual(response.headers["X-Resource-Source"], "patch")
                                 response = session.get(root + "/%2e%2e%2frequirements.txt", timeout=5)
                                 self.assertEqual(response.status_code, 400)
                         finally:

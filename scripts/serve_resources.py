@@ -1,4 +1,4 @@
-"""资源服务：优先返回补丁，未修改资源转发至国服 CDN，并定时更新。"""
+"""资源服务：优先返回补丁，未修改资源跳转至国服 CDN，并定时更新。"""
 
 import argparse
 import json
@@ -25,10 +25,11 @@ class ResourceServer(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, address, directory: Path, upstream: str, proxy=None, active_file=None):
+    def __init__(self, address, directory: Path, upstream: str, proxy=None, active_file=None, stream_official=False):
         self.directory = directory.resolve()
         self.upstream = upstream.rstrip("/")
         self.proxy = proxy
+        self.stream_official = stream_official
         self.lock = Lock()
         self.history = []
         self.in_use = {}
@@ -108,7 +109,7 @@ class ResourceHandler(BaseHTTPRequestHandler):
     """仅暴露 /prodm39 资源路径，避免提供项目源码和凭据文件。"""
 
     def do_GET(self):
-        """下载补丁或转发官方资源。"""
+        """下载补丁，或引导客户端下载官方资源。"""
         self.serve(head=False)
 
     def do_HEAD(self):
@@ -206,9 +207,19 @@ class ResourceHandler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
 
     def forward(self, parsed, head: bool):
-        """保留原请求的范围与查询参数，将未修改资源流式转发给游戏。"""
+        """未修改资源默认由客户端下载，兼容模式才经本服务转发。"""
         suffix = parsed.path[len("/prodm39"):]
         url = self.upstream + suffix + ("?" + parsed.query if parsed.query else "")
+        if not self.server.stream_official:
+            # 官方大包直接走 CDN，避免服务器带宽使客户端下载超时后从头重试。
+            self.send_response(302)
+            self.send_header("Location", url)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Resource-Source", "official")
+            self.end_headers()
+            self.log_message("[REDIRECT] %s", self.path)
+            return
         headers = {"Accept-Encoding": "identity"}
         if self.headers.get("Range"):
             headers["Range"] = self.headers["Range"]
@@ -280,6 +291,7 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18888)
     parser.add_argument("--proxy")
+    parser.add_argument("--stream-official", action="store_true", help="兼容模式：经服务器转发官方资源，默认跳转 CDN")
     parser.add_argument("--update-interval", type=float, default=86400, help="自动更新间隔（秒），默认每天")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--no-update", action="store_true", help="仅提供资源，不启动自动更新")
@@ -306,7 +318,7 @@ def main() -> int:
         raise ValueError("没有可提供的成功补丁构建，请先执行扫描构建。")
     stop = Event()
     with ResourceServer((args.host, args.port), directory, report["cn_source"]["root_url"], args.proxy,
-                        log_dir / "active.json") as server:
+                        log_dir / "active.json", stream_official=args.stream_official) as server:
         # 重启也保留上一份成功输出，避免旧版本资源路径立即失效。
         for candidate in sorted(directory.parent.parent.glob("*/report.json"), reverse=True):
             previous = json.loads(candidate.read_text(encoding="utf-8"))
@@ -318,7 +330,7 @@ def main() -> int:
         server.update_interval = None if args.no_update else args.update_interval
         print(f"[READY] http://{args.host}:{args.port}/prodm39", flush=True)
         print(f"[BUILD] {report['run_id']}；国服资源版本 {report['cn_source']['resource_version']}", flush=True)
-        print("[INFO] PATCH 为本地补丁，OFFICIAL 为官方回源；Ctrl+C 停止服务。", flush=True)
+        print("[INFO] PATCH 为本地补丁，REDIRECT 为官方 CDN 跳转，OFFICIAL 为兼容模式回源；Ctrl+C 停止服务。", flush=True)
         if not args.no_update:
             Thread(target=update_loop, args=(server, args, stop), daemon=True).start()
         try:

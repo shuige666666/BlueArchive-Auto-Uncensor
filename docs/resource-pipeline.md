@@ -73,9 +73,11 @@ adb -s 127.0.0.1:7555 reverse tcp:18888 tcp:18888
 
 服务默认只监听电脑的 `127.0.0.1:18888`，ADB 转发后模拟器可通过同一地址访问电脑。保留原配置其他字段，将 `LocalizeConfig.txt` 的 `ResUrls` 改为 `http://127.0.0.1:18888/prodm39`，先保存原文件以便恢复。该地址依赖端口转发；模拟器重启后需重新执行 `adb reverse`。
 
+配置使用 UTF-8 和 LF 换行，地址末尾不要混入控制字符；服务日志若出现 `/prodm39%13/` 或 `/prodm39%0D/` 并返回 404，应清理配置中的隐藏字符，保存后重新启动游戏。
+
 服务启动后立即检查更新，之后默认每 24 小时检查一次；只有构建输入变化才重新编码。更新在独立工作进程完成，校验成功后自动切换，失败继续提供旧版。当前下载请求使用固定快照，上一版资源路径仍可读取。`--update-interval` 可调整间隔秒数，`--no-update` 只提供资源。
 
-服务优先提供本地补丁，缺失资源回源至报告记录的国服 CDN；日志中的 `PATCH` / `OFFICIAL` 表示来源。支持 GET、HEAD 和补丁单段断点下载。前台运行按 Ctrl+C 停止；后台实例 PID 位于 `.cache/local-server/pid.txt`，请求日志为 `service.log`，更新日志为 `update.log`，两者均限制大小并轮转。`/health` 可查看当前构建和更新状态。
+服务优先提供本地补丁，缺失资源通过 HTTP 302 跳转至报告记录的国服 CDN，由游戏直接下载，避免官方大包占用服务器带宽并超时重试；日志中的 `PATCH` / `REDIRECT` 表示来源。客户端若不支持跳转，可加 `--stream-official` 恢复服务器转发（日志为 `OFFICIAL`）。`--proxy` 用于更新及兼容模式回源，不影响客户端直连 CDN。支持 GET、HEAD 和补丁单段断点下载。前台运行按 Ctrl+C 停止；后台实例 PID 位于 `.cache/local-server/pid.txt`，请求日志为 `service.log`，更新日志为 `update.log`，两者均限制大小并轮转。`/health` 可查看当前构建和更新状态。
 
 每轮成功更新后自动清理：保留最近两个成功构建以及正在使用的版本，删除预览、中间素材、失败/旧构建和探测文件；国服原包保留最近两个资源版本，日服原包保留当前清单仍引用的缓存。源码、`replacement/`、正式下载工具和覆盖备份不会清理。`--keep-previews` 保留最近预览，`--no-cleanup` 禁用自动清理。独立扫描、构建和清理命令使用互斥锁，避免同时改写缓存。
 
@@ -103,6 +105,8 @@ docker compose logs -f resources
 
 Docker 命令无权限时按安装说明配置用户权限，或增加 `sudo`。Git 不包含本机补丁和缓存，服务器默认会自行下载构建；需要复用时一并复制 `.cache/`、`build/` 和 `reports/`。
 
+服务器无法访问 Docker Hub 时，可在能联网的本机构建并导出镜像：`docker compose build`，然后执行 `docker save -o bluearchive-image.tar bluearchive-auto-uncensor:local`。将镜像传到服务器，执行 `docker load -i bluearchive-image.tar` 和 `docker compose up -d --no-build --pull never`；镜像应与服务器仓库提交一致。导入完成后可删除传输用的归档文件。
+
 需要调整配置时，将 `.env.example` 复制为 `.env`。`BA_PORT` 是宿主机端口，默认 18888；已有 Python 服务占用此端口时可改为 18889。`BA_WORKERS` 默认 2，内存较小时可改为 1。`BA_DATA_DIR` 默认项目目录，持久保存 `.cache/`、`build/`、`reports/`，BA-AD 元数据保存在其中的 `.cache/baad/`。已有缓存和补丁可直接复用，但不要让原 Python 更新服务与容器同时写同一份数据。
 
 本机代理填写 `BA_PROXY=http://host.docker.internal:7890`，并确保代理允许 Docker 访问；容器的 `127.0.0.1` 指向容器自身。服务器无需代理时留空。`.env` 不进 Git，镜像不包含资源缓存和本机配置。
@@ -120,7 +124,7 @@ docker compose down
 
 本机模拟器沿用 `adb reverse`，端口与 `BA_PORT` 一致。例如端口为 18889 时，执行 `adb -s 127.0.0.1:7555 reverse tcp:18889 tcp:18889`，游戏填写 `ResUrls=http://127.0.0.1:18889/prodm39`。
 
-服务器默认只向本机开放端口，可由宿主机 Nginx 等反向代理提供 HTTPS，将游戏配置改为 `ResUrls=https://你的域名/prodm39`。代理应保留请求路径并允许较长的资源下载时间。需要直接从外部访问 HTTP 时，在 `.env` 设置 `BA_BIND=0.0.0.0` 并开放对应端口。容器启用自动重启和限量日志；健康检查只确认 HTTP 服务可响应，更新状态仍需查看 `/health` 和 `.cache/local-server/update.log`。
+服务器默认只向本机开放端口，可由宿主机 Nginx 等反向代理提供 HTTPS，将游戏配置改为 `ResUrls=https://你的域名/prodm39`。代理应保留请求路径并允许较长的资源下载时间。需要直接从外部访问 HTTP 时，在 `.env` 设置 `BA_BIND=0.0.0.0` 并放行对应端口；例如使用已放行的 80 端口时设置 `BA_PORT=80`，游戏填写 `ResUrls=http://服务器IP/prodm39`。容器启用自动重启和限量日志；健康检查只确认 HTTP 服务可响应，更新状态仍需查看 `/health` 和 `.cache/local-server/update.log`。
 
 ## 自动化与上传
 
