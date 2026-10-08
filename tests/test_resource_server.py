@@ -100,6 +100,35 @@ class ResourceServerTests(unittest.TestCase):
                                 response = session.get(root + "/AssetBundles/test.bundle", timeout=5)
                                 self.assertEqual(response.content, b"patched")
                                 self.assertEqual(response.headers["X-Resource-Source"], "patch")
+                                # 配置末尾混入隐藏字符时，补丁和官方跳转都应使用修正路径。
+                                for trailing in ("%13", "%0D", "%0a", "%20", "%09", "%20%0D%0A%13"):
+                                    with self.subTest(trailing=trailing):
+                                        response = session.get(root + trailing + "/AssetBundles/test.bundle",
+                                            headers={"Range": "bytes=2-4"}, timeout=5)
+                                        self.assertEqual(response.status_code, 206)
+                                        self.assertEqual(response.content, b"tch")
+                                        response = session.head(root + trailing + "/AssetBundles/test.bundle", timeout=5)
+                                        self.assertEqual(response.status_code, 200)
+                                        self.assertEqual(response.headers["Content-Length"], "7")
+                                        response = session.get(root + trailing + "/AssetBundles/other.bundle?q=x%20y",
+                                            allow_redirects=False, timeout=5)
+                                        self.assertEqual(response.status_code, 302)
+                                        self.assertEqual(response.headers["Location"], upstream + "/AssetBundles/other.bundle?q=x%20y")
+                                server.stream_official = True
+                                calls.clear()
+                                response = session.get(root + "%13%0D%20/AssetBundles/other.bundle?q=1", timeout=5)
+                                self.assertEqual(response.content, b"official")
+                                self.assertEqual(calls, [("/prodm39/AssetBundles/other.bundle?q=1", None)])
+                                server.stream_official = False
+                                # 仅清理前缀边界，文件名里的空格、错误前缀与越界路径不被改写。
+                                response = session.get(root + "/AssetBundles/some%20file.bundle", allow_redirects=False, timeout=5)
+                                self.assertEqual(response.headers["Location"], upstream + "/AssetBundles/some%20file.bundle")
+                                response = session.get(root + "x%13/AssetBundles/test.bundle", timeout=5)
+                                self.assertEqual(response.status_code, 404)
+                                response = session.get(root + "%13/%2e%2e%2frequirements.txt", timeout=5)
+                                self.assertEqual(response.status_code, 400)
+                                response = session.get(root + "%00/AssetBundles/test.bundle", timeout=5)
+                                self.assertEqual(response.status_code, 404)
                                 response = session.get(root + "/%2e%2e%2frequirements.txt", timeout=5)
                                 self.assertEqual(response.status_code, 400)
                         finally:

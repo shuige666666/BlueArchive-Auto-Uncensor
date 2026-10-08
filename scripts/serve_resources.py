@@ -105,6 +105,17 @@ def byte_range(header: str | None, size: int) -> tuple[int, int, bool]:
     return start, end, True
 
 
+def normalize_resource_path(path: str) -> str:
+    """清理配置 URL 末尾带入的 ASCII 空白和控制字符，不修改资源文件名。"""
+    prefix = "/prodm39"
+    if not path.startswith(prefix):
+        return path
+    # 只清理固定前缀与资源分隔符之间的字符，NUL 仍交给路径校验拒绝。
+    suffix = re.sub(r"^(?:%0[1-9a-f]|%1[0-9a-f]|%20|%7f|[\x01-\x20\x7f])+(?=/)",
+                    "", path[len(prefix):], flags=re.IGNORECASE)
+    return prefix + suffix
+
+
 class ResourceHandler(BaseHTTPRequestHandler):
     """仅暴露 /prodm39 资源路径，避免提供项目源码和凭据文件。"""
 
@@ -128,6 +139,11 @@ class ResourceHandler(BaseHTTPRequestHandler):
         """验证路径后优先读取补丁，缺失时才访问官方 CDN。"""
         self.response_started = False
         parsed = urlsplit(self.path)
+        normalized = normalize_resource_path(parsed.path)
+        if normalized != parsed.path:
+            self.log_message("[NORMALIZE] %s -> %s", parsed.path, normalized)
+            # 本地匹配与 CDN 跳转必须使用同一条修正后的路径。
+            parsed = parsed._replace(path=normalized)
         if parsed.path == "/health":
             content = json.dumps({"run_id": self.directory.parent.name,
                 "update_status": self.server.update_status,
