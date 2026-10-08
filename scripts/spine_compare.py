@@ -1,12 +1,10 @@
 """还原 Spine 图集切片后比较，排除位置、旋转和裁剪空白的差异。"""
 
-import re
-
 from PIL import Image
 
 
 def atlas_regions(text: str, texture_name: str, image) -> dict:
-    """依照 Spine atlas 格式恢复切片；按原始画布合并分割片。"""
+    """依照 Spine atlas 格式恢复切片，按完整附件名称保留独立内容。"""
     sections, current = [], None
     for line in text.splitlines():
         line = line.strip()
@@ -50,9 +48,8 @@ def atlas_regions(text: str, texture_name: str, image) -> dict:
         size = round(original_width * sx), round(original_height * sy)
         if min(size) <= 0 or size[0] * size[1] > 32_000_000:
             raise ValueError(f"图集切片原始画布大小异常: {name}")
-        # 仅在原始尺寸相同时合并 _1/_2 形式的分割片，避免混合不同画布。
-        identifier = re.sub(r"_\d+$", "", name)
-        key = (identifier, size)
+        # 数字后缀也是附件名的一部分，不能据此合并身体部件或不同姿态。
+        key = (name, size)
         canvas = regions.setdefault(key, Image.new("RGBA", size))
         canvas.alpha_composite(crop, (round(left * sx), round((original_height - height - bottom) * sy)))
     # 同名不同画布不强行选择，只保留可明确对应的切片。

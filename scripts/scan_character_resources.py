@@ -25,7 +25,7 @@ from resource_sources import (
 from sync_character_resources import workspace_path
 
 COLLECTION = "uis-01_common-14_charactercollect-_mxload-textures"
-SCAN_VERSION = 3
+SCAN_VERSION = 4
 
 
 def catalog_groups(entries: list[dict]) -> dict[str, list[dict]]:

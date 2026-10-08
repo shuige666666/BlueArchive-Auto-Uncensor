@@ -57,6 +57,18 @@ class VisualDifferenceTests(unittest.TestCase):
         result, _ = compare_spine(image, image, "invalid", "invalid", "sample", lambda left, right: image_difference(left, right, 12, .01))
         self.assertEqual(result["classification"], "needs_review")
 
+    def test_numbered_body_parts_with_different_canvases_are_compared(self):
+        """瞬的身体附件带数字后缀且尺寸不同，不能被误合并后整组排除。"""
+        cn = Image.new("RGBA", (100, 100), (100, 100, 100, 255))
+        jp = cn.copy()
+        jp.paste((240, 240, 240, 255), (0, 0, 20, 20))
+        atlas = "sample.png\nsize:100,100\nbody_00\nbounds:0,0,20,20\nbody_01\nbounds:30,0,30,20\nface\nbounds:0,40,10,10\n"
+        result, _ = compare_spine(cn, jp, atlas, atlas, "sample", lambda left, right: image_difference(left, right, 12, .01))
+        self.assertEqual(result["classification"], "visual_difference")
+        self.assertEqual(result["regions"]["body_00"]["classification"], "visual_difference")
+        self.assertIn("body_01", result["regions"])
+        self.assertEqual(result["regions"]["face"]["classification"], "small_difference")
+
     def test_text_only_changes_are_not_auto_patched(self):
         """骨骼或图集变化可以是更新，单靠字节变化不能认定立绘修改。"""
         base = "assets-_mx-spinecharacters-sample-_mxdependency-"
