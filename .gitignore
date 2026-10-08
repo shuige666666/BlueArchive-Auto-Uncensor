@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+
+# Temporary resource files
+*.bundle
+!assetexclusions/**/*.bundle
+ExcelDB_old.db
+ExcelDB_new.db
+ExcelDB_new_backup.db
+
+# Generated directories
+out/
+modified/
+.cache/
+reports/
+
+# Temporary version information
+.current_version.json
+
+# Local/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

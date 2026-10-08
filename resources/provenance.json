@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "assets": {
+    "replacement/assets-_mx-spinecharacters-asuna_spr-_mxdependency-textures/asuna_spr.png": {
+      "type": "Texture2D",
+      "name": "asuna_spr",
+      "filename": "asuna_spr.png",
+      "source_bundle": "assets-_mx-spinecharacters-asuna_spr-_mxdependency-textures-2025-07-02_assets_all_122280295.bundle",
+      "source_bundle_sha256": "ac2e832e2ffdc4ab7d3c37135bf1291dea54afd7550b0d77e9c5d961d497462f",
+      "source_path_id": 836313080858163902,
+      "file_sha256": "10d9c6c8445e2b0f1d61335023639be117e219b076be5136e3072ccf236c6bf6",
+      "content_sha256": "a4cd244f27821b097be39560d3db0278e44c422b3dc99ea9dd18376d544396cf",
+      "replacement_file": "replacement/assets-_mx-spinecharacters-asuna_spr-_mxdependency-textures/asuna_spr.png",
+      "source_region": "jp",
+      "jp_version": "1.73.0",
+      "jp_catalog_url": "https://prod-clientpatch.bluearchiveyostar.com/r96_nvji95owgkbcxlmkb8mi",
+      "synced_at": "2026-10-08T07:17:42.650199+00:00"
+    },
+    "replacement/assets-_mx-spinecharacters-asuna_spr-_mxdependency-textassets/asuna_spr.atlas": {
+      "type": "TextAsset",
+      "name": "asuna_spr.atlas",
+      "filename": "asuna_spr.atlas",
+      "source_bundle": "assets-_mx-spinecharacters-asuna_spr-_mxdependency-textassets-2025-07-02_assets_all_1334284984.bundle",
+      "source_bundle_sha256": "8f2857c056f04afee1588d38694bde2e7854d0d0b45d9335b41525076afcb963",
+      "source_path_id": -5731850056672677704,
+      "file_sha256": "0d503c4c6fd62e938c7d3dac959bb80fd065591081b8d9e3af2547c51fe3f21f",
+      "content_sha256": "0d503c4c6fd62e938c7d3dac959bb80fd065591081b8d9e3af2547c51fe3f21f",
+      "replacement_file": "replacement/assets-_mx-spinecharacters-asuna_spr-_mxdependency-textassets/asuna_spr.atlas",
+      "source_region": "jp",
+      "jp_version": "1.73.0",
+      "jp_catalog_url": "https://prod-clientpatch.bluearchiveyostar.com/r96_nvji95owgkbcxlmkb8mi",
+      "synced_at": "2026-10-08T07:17:42.650199+00:00"
+    },
+    "replacement/assets-_mx-spinecharacters-asuna_spr-_mxdependency-textassets/asuna_spr.skel": {
+      "type": "TextAsset",
+      "name": "asuna_spr.skel",
+      "filename": "asuna_spr.skel",
+      "source_bundle": "assets-_mx-spinecharacters-asuna_spr-_mxdependency-textassets-2025-07-02_assets_all_1334284984.bundle",
+      "source_bundle_sha256": "8f2857c056f04afee1588d38694bde2e7854d0d0b45d9335b41525076afcb963",
+      "source_path_id": -5708690892312096263,
+      "file_sha256": "c73a83ff6e5f039c69a32d050ff1b458f2f2f9e017151de4332c33bedcb6db9f",
+      "content_sha256": "c73a83ff6e5f039c69a32d050ff1b458f2f2f9e017151de4332c33bedcb6db9f",
+      "replacement_file": "replacement/assets-_mx-spinecharacters-asuna_spr-_mxdependency-textassets/asuna_spr.skel",
+      "source_region": "jp",
+      "jp_version": "1.73.0",
+      "jp_catalog_url": "https://prod-clientpatch.bluearchiveyostar.com/r96_nvji95owgkbcxlmkb8mi",
+      "synced_at": "2026-10-08T07:17:42.650199+00:00"
+    },
+    "replacement/uis-01_common-14_charactercollect-_mxload-textures/Student_Portrait_Asuna_Collection.png": {
+      "type": "Texture2D",
+      "name": "Student_Portrait_Asuna_Collection",
+      "filename": "Student_Portrait_Asuna_Collection.png",
+      "source_bundle": "uis-01_common-14_charactercollect-_mxload-textures-2025-07-02_assets_all_4023847724.bundle",
+      "source_bundle_sha256": "97325dc7e763f5fa2dfcc97ae68cf1e04eddf48d956a96a057d23d27dc0c7aff",
+      "source_path_id": 766073122034735811,
+      "file_sha256": "00cd9bc056041b71e51b24bd64b8484b13eb160774107b728f630c787fe7281e",
+      "content_sha256": "9e7ef899fade8f4c6af9fe6a3afc518ac40f9bf26748d3e39f8a9aa4bfc90580",
+      "replacement_file": "replacement/uis-01_common-14_charactercollect-_mxload-textures/Student_Portrait_Asuna_Collection.png",
+      "source_region": "jp",
+      "jp_version": "1.73.0",
+      "jp_catalog_url": "https://prod-clientpatch.bluearchiveyostar.com/r96_nvji95owgkbcxlmkb8mi",
+      "synced_at": "2026-10-08T07:17:42.650199+00:00"
+    }
+  }
+}

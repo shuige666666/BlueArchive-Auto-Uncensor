@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "characters": {
+    "asuna": {
+      "name": "明日奈（通常）",
+      "bundles": [
+        {
+          "key": "assets-_mx-spinecharacters-asuna_spr-_mxdependency-textures",
+          "textures": ["asuna_spr"],
+          "text_assets": []
+        },
+        {
+          "key": "assets-_mx-spinecharacters-asuna_spr-_mxdependency-textassets",
+          "textures": [],
+          "text_assets": ["asuna_spr.atlas", "asuna_spr.skel"]
+        },
+        {
+          "key": "uis-01_common-14_charactercollect-_mxload-textures",
+          "textures": ["Student_Portrait_Asuna_Collection"],
+          "text_assets": []
+        }
+      ]
+    }
+  }
+}

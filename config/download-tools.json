@@ -1,0 +1,17 @@
+{
+  "baad": {
+    "version": "3.1.0",
+    "repository": "https://github.com/Deathemonic/BA-AD",
+    "source_commit": "c7fc5c314298729620d7a842759b65c0cf0bc4e3",
+    "releases": {
+      "windows-x86_64": {
+        "file": "baad-windows-x86_64.zip",
+        "sha256": "bf313041ddf91a81c78a4a62210b2118e12cfe64009c7ca7b98ec074b40407c4"
+      },
+      "linux-x86_64": {
+        "file": "baad-linux-x86_64.zip",
+        "sha256": "e1550a45bf21a53f5cc45ad626107073d4288f983e76d76a3ac637347fbbfe4b"
+      }
+    }
+  }
+}
