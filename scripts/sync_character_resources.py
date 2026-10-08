@@ -19,7 +19,7 @@ from PIL import __version__ as pillow_version
 
 from character_patch import export_assets, find_assets, group_assets_by_bundle, patch_bundle
 from replaceTexture2D import normalize_bundle_name
-from resource_sources import ROOT_DIR, create_session, download_file, download_jp, fetch_cn_catalog, save_json, sha256_file
+from resource_sources import ROOT_DIR, create_session, download_file, download_jp, fetch_cn_catalog, fetch_jp_catalog, ensure_jp_bundles, save_json, sha256_file
 
 
 def workspace_path(value: str | Path) -> Path:
@@ -93,6 +93,20 @@ def apply_sources(staged: Path, records: list[dict], report: dict, cache: Path) 
     report["backup_dir"] = backup.relative_to(ROOT_DIR).as_posix() if backup.exists() else None
 
 
+def build_fingerprint(config: Path, cache: Path, groups) -> str:
+    """记录实际构建输入，忽略无关日服包更新，避免定时任务重复编码。"""
+    from jp_catalog import read_jp_catalog
+    entries = read_jp_catalog(cache / "jp-catalog.bytes")
+    source = json.loads((cache / "cn-source.json").read_text(encoding="utf-8"))
+    inputs = {
+        "builder_version": 1, "config": sha256_file(config),
+        "cn_catalog": sha256_file(cache / "cn-catalog.json"), "cn_source": source,
+        "jp_bundles": sorted((entry["Name"], entry["Size"], entry["Crc"]) for entry in entries
+                             if normalize_bundle_name(Path(entry["Name"])) in groups),
+    }
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
 def build_bundle_job(job: tuple) -> dict:
     """独立加载并构建一个国服包，使贴图编码可在多个进程间并行。"""
     original, source_files, keys, output, previews = job
@@ -143,7 +157,9 @@ def run(args) -> dict:
 
     # 1. 获取版本一致的日服快照和国服官方清单；离线模式只重放缓存。
     if args.offline:
-        jp_metadata = json.loads((cache / "jp-source.json").read_text(encoding="utf-8"))
+        jp_entries, jp_metadata = fetch_jp_catalog(session, cache, offline=True)
+        ensure_jp_bundles(session, cache, [entry for entry in jp_entries
+            if normalize_bundle_name(Path(entry["Name"])) in groups], jp_metadata, offline=True)
         jp_dir = workspace_path(jp_metadata["bundle_dir"])
         cn_catalog = json.loads((cache / "cn-catalog.json").read_text(encoding="utf-8"))
         cn_metadata = json.loads((cache / "cn-source.json").read_text(encoding="utf-8"))
@@ -151,6 +167,7 @@ def run(args) -> dict:
         jp_dir, jp_metadata = download_jp(session, cache, list(groups), proxy=args.proxy)
         cn_catalog, cn_metadata = fetch_cn_catalog(session, cache)
     report.update(jp_source=jp_metadata, cn_source=cn_metadata)
+    report["input_fingerprint"] = build_fingerprint(workspace_path(args.config), cache, groups)
     catalog = copy.deepcopy(cn_catalog)
     entries = {item["Name"]: item for item in catalog["BundleFiles"]}
     cn_cache = cache / "cn" / cn_metadata["resource_version"]
@@ -176,6 +193,17 @@ def run(args) -> dict:
                 raise RuntimeError(f"国服清单中的包名包含路径: {name}")
             target = cn_cache / name
             if args.offline:
+                if not target.exists():
+                    # 全服版本变更时未修改的包可能仍在旧缓存，按官方 MD5 迁入当前目录。
+                    for previous in (cache / "cn").glob(f"*/{name}"):
+                        if previous.stat().st_size != entry["Size"]:
+                            continue
+                        with previous.open("rb") as stream:
+                            matches = hashlib.file_digest(stream, "md5").hexdigest() == entry["Crc"].lower()
+                        if matches:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(previous, target)
+                            break
                 if not target.exists() or target.stat().st_size != entry["Size"]:
                     raise RuntimeError(f"离线缓存不存在或尺寸不符: {target}")
                 with target.open("rb") as stream:
@@ -226,8 +254,8 @@ def run(args) -> dict:
     )
     if args.apply:
         apply_sources(stage, source_records, report, cache)
-    save_json(workspace_path(args.report), report)
     save_json(output.parent / "report.json", report)
+    save_json(workspace_path(args.report), report)
     print(f"[DONE] 校验通过，生成 {len(report['bundles'])} 个国服补丁包；游戏客户端验证尚未执行。", flush=True)
     print(f"[OUTPUT] {output}")
     print(f"[REPORT] {workspace_path(args.report)}")
@@ -250,7 +278,9 @@ def main() -> int:
     if args.workers < 1:
         parser.error("构建进程数必须大于 0。")
     try:
-        run(args)
+        from resource_maintenance import pipeline_lock
+        with pipeline_lock():
+            run(args)
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1

@@ -351,7 +351,9 @@ def main() -> int:
     if args.workers < 1:
         parser.error("比较进程数必须大于 0。")
     try:
-        scan(args)
+        from resource_maintenance import pipeline_lock
+        with pipeline_lock():
+            scan(args)
     except (OSError, ValueError, RuntimeError, KeyError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1

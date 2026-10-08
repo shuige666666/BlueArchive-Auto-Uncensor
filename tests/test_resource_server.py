@@ -4,6 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 import unittest
+import json
 
 import requests
 
@@ -43,12 +44,20 @@ class ResourceServerTests(unittest.TestCase):
             patch_file = Path(directory) / "AssetBundles/test.bundle"
             patch_file.parent.mkdir()
             patch_file.write_bytes(b"patched")
+            manifest = Path(directory) / "AssetBundles/Catalog/v/Android/bundleDownloadInfo.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({"BundleFiles": [{"Name": "removed.bundle"}]}))
+            old = Path(directory) / "old"
+            old_patch = old / "AssetBundles/Android/removed.bundle"
+            old_patch.parent.mkdir(parents=True)
+            old_patch.write_bytes(b"old-patch-must-not-be-used")
             with ThreadingHTTPServer(("127.0.0.1", 0), OfficialHandler) as official:
                 official_thread = Thread(target=official.serve_forever, daemon=True)
                 official_thread.start()
                 upstream = f"http://127.0.0.1:{official.server_port}/prodm39"
                 try:
                     with ResourceServer(("127.0.0.1", 0), Path(directory), upstream) as server:
+                        server.history = [(old, upstream)]
                         thread = Thread(target=server.serve_forever, daemon=True)
                         thread.start()
                         try:
@@ -70,6 +79,9 @@ class ResourceServerTests(unittest.TestCase):
                                 self.assertEqual(response.content, b"official")
                                 self.assertEqual(response.headers["X-Resource-Source"], "official")
                                 self.assertEqual(calls, [("/prodm39/AssetBundles/other.bundle?q=1", "bytes=0-")])
+                                response = session.get(root + "/AssetBundles/Android/removed.bundle", timeout=5)
+                                self.assertEqual(response.content, b"official")
+                                self.assertEqual(response.headers["X-Resource-Source"], "official")
                                 response = session.get(root + "/%2e%2e%2frequirements.txt", timeout=5)
                                 self.assertEqual(response.status_code, 400)
                         finally:

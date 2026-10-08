@@ -37,7 +37,7 @@
 | `.cache/character-resources/` | 官方原包、工具、提取素材、日志及覆盖备份 |
 | `resources/provenance.json` | 经 `--apply` 写入的素材来源 |
 
-扫描缓存包括原包索引、`scan-state.json` 和 `scan-previews/`。阈值、算法或对应包更新后会重新比较，成功批次会保存以便中断续跑。缓存、构建和运行报告不进 Git。
+扫描缓存包括原包索引、`scan-state.json` 和 `scan-previews/`。阈值、算法或对应包更新后会重新比较，成功批次会保存以便中断续跑。缓存、构建和运行报告不进 Git；自动清理后预览路径可能已回收，需要时用 `--rescan` 重新生成。
 
 手动构建仍可使用 `sync_character_resources.py --character asuna`，或传入 `--config reports/resource-diff-characters.json --offline`。该入口的 `--apply` 会备份旧文件后写入 `replacement/` 和来源台账；扫描器不会自动应用素材。构建直接读取官方包，不使用手改的 PNG。
 
@@ -71,7 +71,18 @@ adb -s 127.0.0.1:7555 reverse tcp:18888 tcp:18888
 
 服务默认只监听电脑的 `127.0.0.1:18888`，ADB 转发后模拟器可通过同一地址访问电脑。保留原配置其他字段，将 `LocalizeConfig.txt` 的 `ResUrls` 改为 `http://127.0.0.1:18888/prodm39`，先保存原文件以便恢复。该地址依赖端口转发；模拟器重启后需重新执行 `adb reverse`。
 
-服务读取最近一次成功报告，优先提供本地补丁，缺失资源回源至报告记录的国服 CDN；日志中的 `PATCH` / `OFFICIAL` 表示来源。支持 GET、HEAD 和补丁单段断点下载。构建更新后重启服务切换输出，前台运行按 Ctrl+C 停止；助手启动的后台实例 PID 和日志位于 `.cache/local-server/`。
+服务启动后立即检查更新，之后默认每 24 小时检查一次；只有构建输入变化才重新编码。更新在独立工作进程完成，校验成功后自动切换，失败继续提供旧版。当前下载请求使用固定快照，上一版资源路径仍可读取。`--update-interval` 可调整间隔秒数，`--no-update` 只提供资源。
+
+服务优先提供本地补丁，缺失资源回源至报告记录的国服 CDN；日志中的 `PATCH` / `OFFICIAL` 表示来源。支持 GET、HEAD 和补丁单段断点下载。前台运行按 Ctrl+C 停止；后台实例 PID 位于 `.cache/local-server/pid.txt`，请求日志为 `service.log`，更新日志为 `update.log`，两者均限制大小并轮转。`/health` 可查看当前构建和更新状态。
+
+每轮成功更新后自动清理：保留最近两个成功构建以及正在使用的版本，删除预览、中间素材、失败/旧构建和探测文件；国服原包保留最近两个资源版本，日服原包保留当前清单仍引用的缓存。源码、`replacement/`、正式下载工具和覆盖备份不会清理。`--keep-previews` 保留最近预览，`--no-cleanup` 禁用自动清理。独立扫描、构建和清理命令使用互斥锁，避免同时改写缓存。
+
+```powershell
+# 先查看清理计划；确认需要保留的自定义输出可用 --protect 指定。
+.\.venv\Scripts\python.exe scripts\resource_maintenance.py
+# 实际执行清理。
+.\.venv\Scripts\python.exe scripts\resource_maintenance.py --apply
+```
 
 本地 HTTP 连通不等于游戏已应用补丁。若游戏拒绝 HTTP、使用已缓存清单，或请求了另一个资源版本，应结合服务日志检查；保留原资源缓存，先观察下载和立绘效果。此服务用于本机测试，公网部署另行配置 HTTPS 和反向代理。
 
