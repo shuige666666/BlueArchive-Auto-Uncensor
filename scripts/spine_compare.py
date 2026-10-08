@@ -80,11 +80,11 @@ def compare_spine(cn_image, jp_image, cn_atlas: str, jp_atlas: str, name: str, c
         records[region] = compare(left, right)
         if records[region]["classification"] == "visual_difference":
             previews[region] = left, right
-    classification = "visual_difference" if previews else "small_difference"
-    if not records or any(record["classification"] == "incompatible_region_geometry" for record in records.values()):
-        classification = "needs_review"
+    incomplete = not records or any(record["classification"] == "incompatible_region_geometry" for record in records.values()) or cn.keys() != jp.keys()
+    # 亚子等角色的身体差异已明确时，其他附件无法比较不能抹掉这个结论。
+    classification = "visual_difference" if previews else "needs_review" if incomplete else "small_difference"
     return {
-        "classification": classification, "comparison_method": "atlas_regions",
+        "classification": classification, "comparison_method": "atlas_regions", "comparison_complete": not incomplete,
         "regions": records, "jp_only_regions": sorted(jp.keys() - cn.keys()),
         "cn_only_regions": sorted(cn.keys() - jp.keys()),
     }, previews

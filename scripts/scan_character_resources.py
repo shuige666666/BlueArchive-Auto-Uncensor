@@ -25,7 +25,7 @@ from resource_sources import (
 from sync_character_resources import workspace_path
 
 COLLECTION = "uis-01_common-14_charactercollect-_mxload-textures"
-SCAN_VERSION = 4
+SCAN_VERSION = 6
 
 
 def catalog_groups(entries: list[dict]) -> dict[str, list[dict]]:
@@ -121,9 +121,7 @@ def compare_group(jp_paths, cn_paths, preview: Path, threshold: int, min_ratio: 
             cn_image, jp_image = cn[key].read().image, jp[key].read().image
             atlas_key = ("TextAsset", name + ".atlas")
             region_previews = {}
-            if cn_image.size != jp_image.size:
-                record.update(image_difference(cn_image, jp_image, threshold, min_ratio))
-            elif jp_text_paths is not None:
+            if jp_text_paths is not None:
                 if atlas_key not in jp_text or atlas_key not in cn_text:
                     record.update(classification="needs_review", reason="缺少可对应的图集")
                 else:
@@ -169,13 +167,11 @@ def candidate_config(results: dict) -> dict:
         text_group = base + "textassets"
         text = results.get(text_group, {}).get("assets", [])
         changed = any(record["classification"] == "visual_difference" for record in result["assets"])
-        textures = [record["name"] for record in result["assets"] if record["type"] == "Texture2D" and record["classification"] != "incompatible_size"]
+        textures = [record["name"] for record in result["assets"] if record["type"] == "Texture2D"]
         texts = [record["name"] for record in text if record["type"] == "TextAsset"]
         required_texts = {name + suffix for name in textures for suffix in (".atlas", ".skel")}
-        # 不自动拼接缺少配套骨骼、图集或有尺寸冲突的立绘。
+        # 配套日服素材写入国服对象，纹理尺寸不同不再阻止候选进入补丁。
         if not changed or not textures or not required_texts.issubset(texts):
-            continue
-        if any(record["classification"] == "incompatible_size" for record in result["assets"]):
             continue
         identifier = group.removeprefix("assets-_mx-spinecharacters-").removesuffix("-_mxdependency-textures")
         characters[identifier] = {"name": identifier + " 差异候选", "bundles": [

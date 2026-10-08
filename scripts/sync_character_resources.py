@@ -94,12 +94,12 @@ def apply_sources(staged: Path, records: list[dict], report: dict, cache: Path) 
 
 
 def build_fingerprint(config: Path, cache: Path, groups) -> str:
-    """记录实际构建输入，忽略无关日服包更新，避免定时任务重复编码。"""
+    """记录实际构建输入，忽略无关日服包更新，避免定时任务重复构建。"""
     from jp_catalog import read_jp_catalog
     entries = read_jp_catalog(cache / "jp-catalog.bytes")
     source = json.loads((cache / "cn-source.json").read_text(encoding="utf-8"))
     inputs = {
-        "builder_version": 1, "config": sha256_file(config),
+        "builder_version": 3, "config": sha256_file(config),
         "cn_catalog": sha256_file(cache / "cn-catalog.json"), "cn_source": source,
         "jp_bundles": sorted((entry["Name"], entry["Size"], entry["Crc"]) for entry in entries
                              if normalize_bundle_name(Path(entry["Name"])) in groups),
@@ -119,7 +119,7 @@ def build_bundle_job(job: tuple) -> dict:
 
 
 def run(args) -> dict:
-    """执行获取、匹配、重打包和校验，成功后才允许更新正式资源。"""
+    """获取并匹配两服资源，将配套日服素材写入国服原包。"""
     selected, groups = read_plan(workspace_path(args.config), args.character)
     cache = workspace_path(args.cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
@@ -171,7 +171,6 @@ def run(args) -> dict:
     catalog = copy.deepcopy(cn_catalog)
     entries = {item["Name"]: item for item in catalog["BundleFiles"]}
     cn_cache = cache / "cn" / cn_metadata["resource_version"]
-    source_assets_by_group = {}
     source_files_by_group = {}
     targets = {}
     source_records = []
@@ -180,9 +179,9 @@ def run(args) -> dict:
     for group, required in groups.items():
         print(f"[MATCH] {group}", flush=True)
         jp_files = [path for path in jp_dir.glob("*.bundle") if normalize_bundle_name(path) == group]
+        cn_entries = [item for item in catalog["BundleFiles"] if normalize_bundle_name(Path(item["Name"])) == group]
         source_files_by_group[group] = jp_files
         source_assets = find_assets(jp_files, required)
-        source_assets_by_group[group] = source_assets
         cn_entries = [item for item in catalog["BundleFiles"] if normalize_bundle_name(Path(item["Name"])) == group]
         if not cn_entries:
             raise RuntimeError(f"国服尚无对应资源组: {group}")
@@ -219,14 +218,16 @@ def run(args) -> dict:
                 )
             cn_files.append(target)
         targets[group] = find_assets(cn_files, required)
-        records = export_assets(source_assets, stage / group)
-        for record in records:
-            record["replacement_file"] = f"replacement/{group}/{record['filename']}"
-        source_records.extend(records)
+        # 正常服务构建直接读原包；只有显式导出时才生成额外 PNG 和来源台账。
+        if args.apply:
+            records = export_assets(source_assets, stage / group)
+            for record in records:
+                record["replacement_file"] = f"replacement/{group}/{record['filename']}"
+            source_records.extend(records)
 
-    # 3. 在实际国服包中写入对应资源，独立校验后更新大小和 MD5。
+    # 3. 立绘与画像统一按对象写入国服原包，保留内部标识及未选内容。
     jobs = []
-    for group in source_assets_by_group:
+    for group in source_files_by_group:
         for original, keys in group_assets_by_bundle(targets[group]).items():
             generated = output / "AssetBundles/Android" / original.name
             jobs.append((original, source_files_by_group[group], keys, generated, output.parent / "previews"))
@@ -250,7 +251,8 @@ def run(args) -> dict:
         source_assets=source_records,
         structural_validation_passed=True,
         preview_dir=(output.parent / "previews").relative_to(ROOT_DIR).as_posix(),
-        staged_replacement_dir=stage.relative_to(ROOT_DIR).as_posix(),
+        staged_replacement_dir=stage.relative_to(ROOT_DIR).as_posix() if stage.exists() else None,
+        validation_scope="国服内部标识和未选对象保持；日服图集骨架无损写入、纹理尺寸和格式校验；游戏内显示待验证",
     )
     if args.apply:
         apply_sources(stage, source_records, report, cache)

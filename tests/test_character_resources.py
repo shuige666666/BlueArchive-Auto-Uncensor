@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from character_patch import find_assets, text_bytes
+from character_patch import find_assets, text_bytes, patch_bundle, object_inventory
+import UnityPy
+from PIL import Image
 from resource_sources import download_file
 from sync_character_resources import read_plan, workspace_path
 from uploadR2 import run as upload_resources
@@ -66,6 +68,39 @@ class CharacterPlanTests(unittest.TestCase):
 
 class AssetIntegrityTests(unittest.TestCase):
     """验证缺项、同名冲突和二进制数据的真实失败路径。"""
+
+    def test_texture_dimension_change_preserves_container_and_object_ids(self):
+        """用原项目国服结构预制包验证真实序列化：尺寸变化不改变容器和对象标识。"""
+        base = next((Path(__file__).resolve().parents[1] / "assetexclusions").glob("assets-_mx-spinecharacters-ako_spr-_mxdependency-textures-*.bundle"))
+        source_env = UnityPy.load(str(base))
+        source = next(o for o in source_env.objects if o.type.name == "Texture2D")
+        data = source.read()
+        data.image = Image.new("RGBA", (64, 32), (120, 80, 40, 255))
+        data.save()
+        # ObjectReader 再读取仍基于原输入，先序列化再加载以得到真正的新尺寸来源。
+        source_env = UnityPy.load(source_env.file.save(packer="original"))
+        source = next(o for o in source_env.objects if o.type.name == "Texture2D")
+        key = ("Texture2D", "ako_spr")
+        with test_directory() as directory:
+            output = Path(directory) / "modified.bundle"
+            report = patch_bundle(base, {key: (base, source)}, {key}, output, Path(directory) / "previews")
+            original = UnityPy.load(str(base))
+            rebuilt = UnityPy.load(output.read_bytes())
+            self.assertEqual(set(original.file.files), set(rebuilt.file.files))
+            before, after = object_inventory(original), object_inventory(rebuilt)
+            self.assertEqual(before.keys(), after.keys())
+            for obj in original.objects:
+                if obj.type.name == "AssetBundle":
+                    identity = (obj.assets_file.name, obj.path_id)
+                    self.assertEqual(before[identity], after[identity])
+            target = next(o for o in rebuilt.objects if o.type.name == "Texture2D")
+            self.assertEqual(target.read().image.size, (64, 32))
+            self.assertEqual(target.path_id, source.path_id)
+            self.assertEqual(target.read().get_image_data(), source.read().get_image_data())
+            self.assertEqual(report["assets"][0]["original_size"], [1024, 1024])
+            self.assertEqual(report["assets"][0]["size"], [64, 32])
+            self.assertEqual(report["assets"][0]["texture_transfer"], "encoded_data")
+            self.assertTrue(report["untargeted_objects_unchanged"])
 
     def test_spine_binary_bytes_survive_surrogateescape(self):
         """骨骼文件中不是 UTF-8 的字节不能被替换字符损坏。"""

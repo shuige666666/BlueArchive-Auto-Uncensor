@@ -78,15 +78,44 @@ class VisualDifferenceTests(unittest.TestCase):
         }
         self.assertFalse(candidate_config(result)["characters"])
 
-    def test_incompatible_page_size_is_not_hidden_by_atlas_scaling(self):
-        """图集能还原切片也不代表整页能写入国服，尺寸不同必须留待适配。"""
+    def test_changed_body_survives_incompatible_face(self):
+        """亚子的身体已有差异，表情比例不兼容不能取消整套补丁。"""
+        cn = Image.new("RGBA", (100, 100), (100, 100, 100, 255))
+        jp = cn.copy()
+        jp.paste((240, 240, 240, 255), (0, 0, 20, 20))
+        base_atlas = "sample.png\nsize:100,100\nbody\nbounds:0,0,20,20\nface\n"
+        result, _ = compare_spine(cn, jp, base_atlas + "bounds:30,0,10,10\n", base_atlas + "bounds:30,0,20,10\n", "sample", lambda left, right: image_difference(left, right, 12, .01))
+        self.assertEqual(result["classification"], "visual_difference")
+        self.assertFalse(result["comparison_complete"])
+        self.assertEqual(result["regions"]["face"]["classification"], "incompatible_region_geometry")
+        base = "assets-_mx-spinecharacters-sample-_mxdependency-"
+        groups = {
+            base + "textures": {"assets": [dict(result, name="sample", type="Texture2D")]},
+            base + "textassets": {"assets": [{"name": "sample" + suffix, "type": "TextAsset"} for suffix in (".atlas", ".skel")]},
+        }
+        self.assertIn("sample", candidate_config(groups)["characters"])
+
+    def test_missing_attachment_without_visual_evidence_needs_review(self):
+        """只有单服附件不能按共有部分相同推断整套没有差异。"""
+        image = Image.new("RGBA", (100, 100), (100, 100, 100, 255))
+        atlas = "sample.png\nsize:100,100\nbody\nbounds:0,0,20,20\n"
+        result, _ = compare_spine(image, image, atlas, atlas + "extra\nbounds:30,0,10,10\n", "sample", lambda left, right: image_difference(left, right, 12, .01))
+        self.assertEqual(result["classification"], "needs_review")
+        self.assertFalse(result["comparison_complete"])
+        self.assertEqual(result["jp_only_regions"], ["extra"])
+
+    def test_different_page_sizes_are_compared_using_atlas(self):
+        """日服整包提供时，纹理页尺寸不同仍应比较还原后的附件。"""
         key = ("Texture2D", "sample")
-        jp = SimpleNamespace(read=lambda: SimpleNamespace(image=Image.new("RGBA", (10, 10))))
-        cn = SimpleNamespace(read=lambda: SimpleNamespace(image=Image.new("RGBA", (20, 10))))
-        with patch("scan_character_resources.index_group", side_effect=[({key: jp}, []), ({key: cn}, []), ({}, []), ({}, [])]), patch("scan_character_resources.asset_digest", side_effect=["cn", "jp"]), patch("scan_character_resources.compare_spine") as atlas:
+        text_key = ("TextAsset", "sample.atlas")
+        jp = SimpleNamespace(read=lambda: SimpleNamespace(image=Image.new("RGBA", (10, 10), (240, 240, 240, 255))))
+        cn = SimpleNamespace(read=lambda: SimpleNamespace(image=Image.new("RGBA", (20, 20), (100, 100, 100, 255))))
+        jp_text = SimpleNamespace(read=lambda: SimpleNamespace(m_Script="sample.png\nsize:10,10\nbody\nbounds:0,0,10,10\n"))
+        cn_text = SimpleNamespace(read=lambda: SimpleNamespace(m_Script="sample.png\nsize:20,20\nbody\nbounds:0,0,20,20\n"))
+        with patch("scan_character_resources.index_group", side_effect=[({key: jp}, []), ({key: cn}, []), ({text_key: jp_text}, []), ({text_key: cn_text}, [])]), patch("scan_character_resources.asset_digest", side_effect=["cn", "jp"]), patch("PIL.Image.Image.save"):
             result = compare_group([], [], ROOT_DIR / ".cache/tests", 12, .01, ["jp-atlas"], ["cn-atlas"])
-        self.assertEqual(result["assets"][0]["classification"], "incompatible_size")
-        atlas.assert_not_called()
+        self.assertEqual(result["assets"][0]["classification"], "visual_difference")
+        self.assertEqual(result["assets"][0]["comparison_method"], "atlas_regions")
 
 
 class IncrementalScanTests(unittest.TestCase):

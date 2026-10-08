@@ -130,13 +130,23 @@ def patch_bundle(
         if key[0] == "Texture2D":
             source_image = source_data.image.convert("RGBA")
             original_size = (data.m_Width, data.m_Height)
-            if source_image.size != original_size:
-                raise RuntimeError(f"贴图尺寸不一致，需要人工适配: {key[1]} JP={source_image.size}, CN={original_size}")
-            record.update(size=list(original_size), texture_format=data.m_TextureFormat)
+            record.update(original_size=list(original_size), size=list(source_image.size), texture_format=data.m_TextureFormat)
             preview_dir.mkdir(parents=True, exist_ok=True)
             data.image.save(preview_dir / f"{key[1]}-cn.png")
             source_image.save(preview_dir / f"{key[1]}-jp.png")
-            data.image = source_image
+            # 编码格式一致时直接写入日服纹理数据，避免再编码损失；容器和对象仍保留国服标识。
+            if data.m_TextureFormat == source_data.m_TextureFormat and data.m_PlatformBlob == source_data.m_PlatformBlob:
+                data.image_data = source_data.get_image_data()
+                for field in ("m_Width", "m_Height", "m_CompleteImageSize", "m_MipCount", "m_MipMap"):
+                    setattr(data, field, getattr(source_data, field))
+                if data.m_StreamData is not None:
+                    data.m_StreamData.path = ""
+                    data.m_StreamData.offset = data.m_StreamData.size = 0
+                record["texture_transfer"] = "encoded_data"
+            else:
+                # 格式不同才转换为国服纹理格式，尺寸采用日服原图，不拉伸或重排。
+                data.image = source_image
+                record["texture_transfer"] = "reencoded"
         else:
             data.m_Script = text_bytes(source_data).decode("utf-8", "surrogateescape")
         data.save()
@@ -178,6 +188,8 @@ def patch_bundle(
             expected = source_assets[key][1].read().image.convert("RGBA")
             if actual.size != expected.size or target.read().m_TextureFormat != record["texture_format"]:
                 raise RuntimeError(f"重打包改变了贴图尺寸或格式: {key}")
+            if record["texture_transfer"] == "encoded_data" and record["output_sha256"] != record["source_sha256"]:
+                raise RuntimeError(f"原始纹理数据写入后像素内容不一致: {key}")
             # ETC/ASTC 再编码有损，记录像素误差供复核，不伪装成像素完全一致。
             record["mean_absolute_pixel_error_rgba"] = ImageStat.Stat(ImageChops.difference(actual, expected)).mean
             actual.save(preview_dir / f"{key[1]}-output.png")
@@ -191,6 +203,7 @@ def patch_bundle(
         "untargeted_object_count": len(unchanged_ids),
         "object_ids_preserved": True,
         "untargeted_objects_unchanged": True,
+        "replacement_mode": "cn_objects",
         "assets": changes,
     }
 
