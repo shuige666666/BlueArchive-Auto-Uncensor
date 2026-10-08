@@ -31,6 +31,9 @@ reports/
 .current_version.json
 
 # Local/editor files
+.env
+.env.*
+!.env.example
 .vscode/
 .idea/
 *.swp

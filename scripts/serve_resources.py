@@ -1,4 +1,4 @@
-"""本地测试资源服务：优先返回补丁，未修改资源转发至国服 CDN。"""
+"""资源服务：优先返回补丁，未修改资源转发至国服 CDN，并定时更新。"""
 
 import argparse
 import json
@@ -274,7 +274,7 @@ def update_loop(server, args, stop):
 
 
 def main() -> int:
-    """读取最近成功构建，启动仅供本地模拟器测试的资源服务。"""
+    """读取最近成功构建，启动资源服务及可选的自动更新任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", default="reports/character-resources.json")
     parser.add_argument("--host", default="127.0.0.1")

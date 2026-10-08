@@ -1,0 +1,10 @@
+# 只发送运行所需源码，缓存、补丁和本地配置不会进入镜像。
+**
+!Dockerfile
+!requirements.txt
+!scripts/
+!scripts/**
+!config/
+!config/**
+**/__pycache__/
+**/*.pyc

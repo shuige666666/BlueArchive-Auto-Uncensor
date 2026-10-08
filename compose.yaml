@@ -1,0 +1,39 @@
+name: bluearchive-auto-uncensor
+
+services:
+  resources:
+    image: bluearchive-auto-uncensor:local
+    build: .
+    platform: linux/amd64
+    init: true
+    restart: unless-stopped
+    command:
+      - --host
+      - 0.0.0.0
+      - --workers
+      - "${BA_WORKERS:-2}"
+      - --update-interval
+      - "${BA_UPDATE_INTERVAL:-86400}"
+      - --proxy
+      - "${BA_PROXY:-}"
+    ports:
+      - "${BA_BIND:-127.0.0.1}:${BA_PORT:-18888}:18888"
+    # 数据独立于镜像保存，更新代码和重建容器不会删除补丁。
+    volumes:
+      - ${BA_DATA_DIR:-.}/.cache:/app/.cache
+      - ${BA_DATA_DIR:-.}/build:/app/build
+      - ${BA_DATA_DIR:-.}/reports:/app/reports
+      - ${BA_DATA_DIR:-.}/.cache/baad:/root/.local/share/baad
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18888/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10m
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

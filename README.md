@@ -1,4 +1,4 @@
-# BlueArchive-Uncensor
+# BlueArchive-Auto-Uncensor
 
 非官方《蔚蓝档案》角色资源补丁项目。沿用原项目可用的替换方式，新增日服素材自动获取、国服补丁构建和来源记录。
 
@@ -24,6 +24,17 @@ py -3.12 -m venv .venv
 [运行与维护说明](docs/resource-pipeline.md) · [角色配置](config/characters.json) · [下载工具版本](config/download-tools.json)
 
 已构建补丁后，可用 `scripts/serve_resources.py` 启动资源服务，自动定时更新并清理历史产物；模拟器端口转发与配置方式见维护说明。
+
+## Docker Compose 部署
+
+安装 Docker 和 Compose 后，在项目根目录执行：
+
+```sh
+docker compose up -d --build
+docker compose logs -f resources
+```
+
+首次启动自动下载、扫描并生成补丁，完成后可访问 `http://127.0.0.1:18888/health`。之后每天检查更新，失败时继续提供已生成的补丁。缓存、补丁和报告保存在宿主机，不进入镜像。支持 Linux x86_64；端口、代理及服务器部署见[运行与维护说明](docs/resource-pipeline.md#docker-compose-部署)。
 
 ## 使用须知
 

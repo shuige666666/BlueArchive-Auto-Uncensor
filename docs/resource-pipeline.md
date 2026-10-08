@@ -86,13 +86,47 @@ adb -s 127.0.0.1:7555 reverse tcp:18888 tcp:18888
 .\.venv\Scripts\python.exe scripts\resource_maintenance.py --apply
 ```
 
-本地 HTTP 连通不等于游戏已应用补丁。若游戏拒绝 HTTP、使用已缓存清单，或请求了另一个资源版本，应结合服务日志检查；保留原资源缓存，先观察下载和立绘效果。此服务用于本机测试，公网部署另行配置 HTTPS 和反向代理。
+本地 HTTP 连通不等于游戏已应用补丁。若游戏拒绝 HTTP、使用已缓存清单，或请求了另一个资源版本，应结合服务日志检查；保留原资源缓存，先观察下载和立绘效果。
+
+## Docker Compose 部署
+
+使用 Linux x86_64 服务器和 Docker Compose v2，本机 Docker Desktop 也可测试。在项目根目录执行 `docker compose up -d --build`；无需先在宿主机安装 Python。首次没有成功报告时会先下载、扫描和构建，初始化完成前端口尚未开放，进度用 `docker compose logs -f resources` 查看。服务启动后立即检查更新，之后每 24 小时检查一次并自动清理，无需另设定时任务或依赖 GitHub Actions。
+
+Ubuntu 首次部署先按 [Docker 官方说明](https://docs.docker.com/engine/install/ubuntu/) 安装 Engine 和 Compose 插件，用 `uname -m` 确认架构为 `x86_64`。提交并推送本地改动后，在服务器执行：
+
+```sh
+git clone https://github.com/shuige666666/BlueArchive-Auto-Uncensor.git
+cd BlueArchive-Auto-Uncensor
+docker compose up -d --build
+docker compose logs -f resources
+```
+
+Docker 命令无权限时按安装说明配置用户权限，或增加 `sudo`。Git 不包含本机补丁和缓存，服务器默认会自行下载构建；需要复用时一并复制 `.cache/`、`build/` 和 `reports/`。
+
+需要调整配置时，将 `.env.example` 复制为 `.env`。`BA_PORT` 是宿主机端口，默认 18888；已有 Python 服务占用此端口时可改为 18889。`BA_WORKERS` 默认 2，内存较小时可改为 1。`BA_DATA_DIR` 默认项目目录，持久保存 `.cache/`、`build/`、`reports/`，BA-AD 元数据保存在其中的 `.cache/baad/`。已有缓存和补丁可直接复用，但不要让原 Python 更新服务与容器同时写同一份数据。
+
+本机代理填写 `BA_PROXY=http://host.docker.internal:7890`，并确保代理允许 Docker 访问；容器的 `127.0.0.1` 指向容器自身。服务器无需代理时留空。`.env` 不进 Git，镜像不包含资源缓存和本机配置。
+
+```sh
+docker compose ps
+docker compose logs --tail=100 resources
+curl http://127.0.0.1:18888/health
+# 拉取自己已提交的代码后，重建并启动；持久化数据继续使用。
+git pull
+docker compose up -d --build
+# 停止服务，保留缓存和补丁。
+docker compose down
+```
+
+本机模拟器沿用 `adb reverse`，端口与 `BA_PORT` 一致。例如端口为 18889 时，执行 `adb -s 127.0.0.1:7555 reverse tcp:18889 tcp:18889`，游戏填写 `ResUrls=http://127.0.0.1:18889/prodm39`。
+
+服务器默认只向本机开放端口，可由宿主机 Nginx 等反向代理提供 HTTPS，将游戏配置改为 `ResUrls=https://你的域名/prodm39`。代理应保留请求路径并允许较长的资源下载时间。需要直接从外部访问 HTTP 时，在 `.env` 设置 `BA_BIND=0.0.0.0` 并开放对应端口。容器启用自动重启和限量日志；健康检查只确认 HTTP 服务可响应，更新状态仍需查看 `/health` 和 `.cache/local-server/update.log`。
 
 ## 自动化与上传
 
 GitHub Actions 每天北京时间 16:00 扫描两服共有立绘，亦可手动输入资源组通配符；报告、候选配置和预览 Artifact 保留 7 天。提交到 GitHub 默认分支并启用 Actions 后生效，当前不自动发布。
 
-沿用原项目部署配置。输出是补丁覆盖层，服务器仍需提供未修改的官方资源。上传前查看计划：
+使用资源服务时，未修改内容会自动回源，不需要上传完整官方资源。若沿用原项目的 R2 上传方式，输出仅是补丁覆盖层，托管端仍需配置官方资源回源。上传前查看计划：
 
 ```powershell
 $resourceReport = Get-Content -Raw -Encoding UTF8 reports/character-resources.json | ConvertFrom-Json
