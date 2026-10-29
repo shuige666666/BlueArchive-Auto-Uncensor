@@ -5,6 +5,7 @@ from pathlib import Path
 from threading import Thread
 import unittest
 import json
+import hashlib
 
 import requests
 
@@ -22,6 +23,96 @@ class ResourceServerTests(unittest.TestCase):
         self.assertEqual(byte_range("bytes=2-99", 6), (2, 5, True))
         with self.assertRaises(ValueError):
             byte_range("bytes=6-", 6)
+
+    def test_new_catalog_uses_official_bundles_until_ready_catalog_is_requested(self):
+        """复现同名包跨版本变化，验证回源、重启、失败更新及恢复后的清单一致性。"""
+        name = "same.bundle"
+        official_bytes = b"official-new"
+        new_patch = b"new-patched-content"
+
+        def manifest(content):
+            """生成与实际响应一致的最小下载清单。"""
+            return {"BundleFiles": [{"Name": name, "Size": len(content),
+                "Crc": hashlib.md5(content).hexdigest()}]}
+
+        class OfficialHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                """模拟新版官方清单、更新标记和同名资源包。"""
+                content = json.dumps(manifest(official_bytes)).encode() if self.path.endswith(".json") else (
+                    b"official-hash" if self.path.endswith(".hash") else official_bytes)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+            def log_message(self, *args):
+                """隐藏测试上游的访问日志。"""
+                pass
+
+        with test_directory() as temporary:
+            root = Path(temporary)
+            old, new = root / "old", root / "new"
+            for directory, version, content in ((old, "202610010000", b"old-patch"),
+                                                (new, "202610220000", new_patch)):
+                target = directory / "AssetBundles/Android" / name
+                target.parent.mkdir(parents=True)
+                target.write_bytes(content)
+                info = directory / f"AssetBundles/Catalog/{version}/Android/bundleDownloadInfo.json"
+                info.parent.mkdir(parents=True)
+                info.write_text(json.dumps(manifest(content)))
+                info.with_suffix(".hash").write_text("1")
+            active = root / "active.json"
+            with ThreadingHTTPServer(("127.0.0.1", 0), OfficialHandler) as official:
+                upstream = f"http://127.0.0.1:{official.server_port}/prodm39"
+                official_thread = Thread(target=official.serve_forever, daemon=True)
+                official_thread.start()
+                try:
+                    with ResourceServer(("127.0.0.1", 0), old, upstream, active_file=active) as server:
+                        thread = Thread(target=server.serve_forever, daemon=True)
+                        thread.start()
+                        try:
+                            base = f"http://127.0.0.1:{server.server_port}"
+                            bundle = base + "/prodm39/AssetBundles/Android/" + name
+                            catalog = base + "/prodm39/AssetBundles/Catalog/202610220000/Android/bundleDownloadInfo.json"
+                            with requests.Session() as session:
+                                session.trust_env = False
+                                self.assertEqual(session.get(bundle, timeout=5).content, b"old-patch")
+                                # 游戏先请求新版标记，之后所有新下载必须跟随官方清单。
+                                response = session.get(catalog.replace(".json", ".hash"), timeout=5)
+                                self.assertEqual(response.content, b"official-hash")
+                                info = session.get(catalog, timeout=5).json()["BundleFiles"][0]
+                                response = session.get(bundle, timeout=5)
+                                self.assertEqual(len(response.content), info["Size"])
+                                self.assertEqual(hashlib.md5(response.content).hexdigest(), info["Crc"])
+                                self.assertEqual(session.get(base + "/health", timeout=5).json()["resource_mode"], "official")
+                                with ResourceServer(("127.0.0.1", 0), old, upstream, active_file=active) as restarted:
+                                    self.assertFalse(restarted.allow_patch(old.resolve(), "AssetBundles/Android/" + name))
+                                report = {"output_dir": str(new), "structural_validation_passed": False,
+                                          "cn_source": {"root_url": upstream}, "run_id": "new"}
+                                with self.assertRaises(ValueError):
+                                    server.activate(report)
+                                self.assertEqual(session.get(bundle, timeout=5).content, official_bytes)
+                                report["structural_validation_passed"] = True
+                                server.activate(report)
+                                # 构建完成不立刻改变仍按官方清单下载的请求。
+                                self.assertEqual(session.get(bundle, timeout=5).content, official_bytes)
+                                info = session.get(catalog, timeout=5).json()["BundleFiles"][0]
+                                response = session.get(bundle, timeout=5)
+                                self.assertEqual(response.content, new_patch)
+                                self.assertEqual(len(response.content), info["Size"])
+                                self.assertEqual(hashlib.md5(response.content).hexdigest(), info["Crc"])
+                                response = session.get(bundle, headers={"Range": "bytes=2-5"}, timeout=5)
+                                self.assertEqual(response.status_code, 206)
+                                self.assertEqual(response.content, new_patch[2:6])
+                                # 迟到的旧版清单不应被回源后与新补丁混用。
+                                response = session.get(catalog.replace("202610220000", "202610010000"), timeout=5)
+                                self.assertEqual(response.status_code, 409)
+                        finally:
+                            server.shutdown()
+                            thread.join()
+                finally:
+                    official.shutdown()
+                    official_thread.join()
 
     def test_patch_priority_fallback_head_and_traversal(self):
         """真实 HTTP 请求验证补丁、回源与 CDN 跳转，并拒绝目录越界。"""
@@ -47,6 +138,7 @@ class ResourceServerTests(unittest.TestCase):
             manifest = Path(directory) / "AssetBundles/Catalog/v/Android/bundleDownloadInfo.json"
             manifest.parent.mkdir(parents=True)
             manifest.write_text(json.dumps({"BundleFiles": [{"Name": "removed.bundle"}]}))
+            manifest.with_suffix(".hash").write_text("1")
             old = Path(directory) / "old"
             old_patch = old / "AssetBundles/Android/removed.bundle"
             old_patch.parent.mkdir(parents=True)

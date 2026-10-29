@@ -36,16 +36,47 @@ class ResourceServer(ThreadingHTTPServer):
         self.active_file = active_file
         self.update_status = "disabled"
         self.update_interval = None
-        self.bundle_names = {self.directory: self.read_bundle_names(self.directory)}
+        self.catalog_versions = {self.directory: self.read_catalog_versions(self.directory)}
+        # 新版清单回源后，后续无版本号的 Bundle 请求也必须使用官方资源。
+        self.requested_version = None
+        self.official_mode = False
+        if active_file and active_file.exists():
+            active = json.loads(active_file.read_text(encoding="utf-8"))
+            self.requested_version = active.get("requested_version")
+            self.official_mode = active.get("official_mode", False)
         super().__init__(address, ResourceHandler)
 
     @staticmethod
-    def read_bundle_names(directory):
-        """记录当前清单中的文件名，避免补丁取消后误回退到旧补丁。"""
-        names = set()
-        for manifest in directory.glob("AssetBundles/Catalog/*/Android/bundleDownloadInfo.json"):
-            names.update(entry["Name"] for entry in json.loads(manifest.read_text(encoding="utf-8"))["BundleFiles"])
-        return names
+    def read_catalog_versions(directory):
+        """只把清单与更新标记均已生成的版本视为可提供补丁。"""
+        return {path.parent.parent.name
+                for path in directory.glob("AssetBundles/Catalog/*/Android/bundleDownloadInfo.json")
+                if path.with_suffix(".hash").is_file()}
+
+    def allow_patch(self, directory, relative):
+        """发现未适配的清单版本后全局回源，直到对应补丁构建完成。"""
+        match = re.fullmatch(r"AssetBundles/Catalog/([^/]+)/Android/[^/]+", relative)
+        with self.lock:
+            versions = self.catalog_versions[directory]
+            if match:
+                # 数字版本按发布时间递增，迟到的旧版请求不覆盖已发现的新版本。
+                version = match[1]
+                if self.requested_version is None or version >= self.requested_version:
+                    changed = version != self.requested_version
+                    self.requested_version = version
+                    # 构建完成后也先保持回源，直到客户端重新请求配套清单/标记。
+                    if Path(relative).name in ("bundleDownloadInfo.json", "bundleDownloadInfo.hash"):
+                        self.official_mode = version not in versions
+                    elif version not in versions:
+                        self.official_mode = True
+                    self.persist_active()
+                    if changed:
+                        logging.info("[CATALOG] 请求版本 %s", version)
+            allowed = bool(versions) and not self.official_mode and (self.requested_version is None or self.requested_version in versions)
+            # 旧版清单不能回源后再配上当前补丁；不支持的旧版本提示客户端重试。
+            if match and allowed and match[1] not in versions:
+                return None
+            return allowed
 
     def protected_outputs(self):
         """保留当前、上一版和尚有请求使用的快照目录。"""
@@ -54,7 +85,9 @@ class ResourceServer(ThreadingHTTPServer):
     def persist_active(self):
         """保存清理保护目录，使独立清理命令也不会删除正在使用的版本。"""
         if self.active_file:
-            save_json(self.active_file, {"protected_outputs": [path.relative_to(ROOT_DIR).as_posix()
+            save_json(self.active_file, {"requested_version": self.requested_version,
+                "official_mode": self.official_mode,
+                "protected_outputs": [path.relative_to(ROOT_DIR).as_posix()
                 for path in sorted(self.protected_outputs())]})
 
     @contextmanager
@@ -78,12 +111,12 @@ class ResourceServer(ThreadingHTTPServer):
         directory = workspace_path(report["output_dir"])
         if not report.get("structural_validation_passed") or not directory.is_dir():
             raise ValueError("更新产物没有通过结构校验，继续提供旧版。")
-        names = self.read_bundle_names(directory)
+        versions = self.read_catalog_versions(directory)
         with self.lock:
             if directory != self.directory:
                 self.history = [(self.directory, self.upstream)]
                 self.directory, self.upstream = directory, report["cn_source"]["root_url"].rstrip("/")
-                self.bundle_names[directory] = names
+                self.catalog_versions[directory] = versions
                 logging.info("[SWITCH] %s", report["run_id"])
             self.persist_active()
 
@@ -132,7 +165,6 @@ class ResourceHandler(BaseHTTPRequestHandler):
         with self.server.lease() as snapshots:
             self.snapshots = snapshots
             self.directory, self.upstream = snapshots[0]
-            self.current_bundle_names = self.server.bundle_names[self.directory]
             self.handle_resource(head)
 
     def handle_resource(self, head: bool):
@@ -145,9 +177,17 @@ class ResourceHandler(BaseHTTPRequestHandler):
             # 本地匹配与 CDN 跳转必须使用同一条修正后的路径。
             parsed = parsed._replace(path=normalized)
         if parsed.path == "/health":
+            with self.server.lock:
+                requested_version = self.server.requested_version
+                official_mode = self.server.official_mode
+            versions = self.server.catalog_versions[self.directory]
             content = json.dumps({"run_id": self.directory.parent.name,
                 "update_status": self.server.update_status,
-                "update_interval_seconds": self.server.update_interval}).encode()
+                "update_interval_seconds": self.server.update_interval,
+                "requested_resource_version": requested_version,
+                "patch_resource_versions": sorted(versions),
+                "resource_mode": "patch" if versions and not official_mode and (requested_version is None or requested_version in versions)
+                    else "official"}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(content)))
@@ -169,13 +209,14 @@ class ResourceHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Invalid resource path")
             return
         try:
-            current_official = relative.startswith("AssetBundles/Android/") and Path(relative).name in self.current_bundle_names
-            if not target.is_file() and not current_official:
-                for directory, upstream in self.snapshots[1:]:
-                    previous = (directory / relative).resolve()
-                    if previous.is_relative_to(directory) and previous.is_file():
-                        target = previous
-                        break
+            allowed = self.server.allow_patch(self.directory, relative)
+            if allowed is None:
+                self.send_error(409, "Resource catalog superseded; restart the game to refresh")
+                return
+            if not allowed:
+                self.forward(parsed, head)
+                return
+            # 历史快照只保护已开始的下载，不再用于新请求的补丁兜底。
             if target.is_file():
                 self.local_file(target, head)
             else:
