@@ -39,6 +39,8 @@
 
 扫描缓存包括原包索引、`scan-state.json` 和 `scan-previews/`。阈值、算法或对应包更新后会重新比较，成功批次会保存以便中断续跑。缓存、构建和运行报告不进 Git；自动清理后预览路径可能已回收，需要时用 `--rescan` 重新生成。
 
+构建按每包的国服原包、日服原包、替换对象和处理规则计算输入指纹；输入未变且旧文件通过 SHA256 校验时直接复制，只有变化或损坏的包重建。报告 `build_stats` 记录复用、重建及暂用官方的数量，日志分别为 `REUSE`、`BUILD`。旧报告可用于兼容清单，但首次写入构建指纹仍可能重建一次；修改素材写入规则时需递增 `patch_reuse.py` 的 `PATCH_FORMAT_VERSION`。
+
 手动构建仍可使用 `sync_character_resources.py --character asuna`，或传入 `--config reports/resource-diff-characters.json --offline`。该入口的 `--apply` 将所选素材备份后写入 `replacement/` 和来源台账；常规构建直接读取两服原包，不额外导出素材。扫描器不会自动应用素材。构建直接读取官方包，不使用手改的 PNG。
 
 BA-AD 另使用 Windows 的 `%LOCALAPPDATA%\baad` 或 Linux 的 `~/.local/share/baad` 保存元数据。下载失败查看 `.cache/character-resources/jp-download.log`；失败不会更新最新报告，应结合退出状态和报告时间判断。
@@ -75,9 +77,11 @@ adb -s 127.0.0.1:7555 reverse tcp:18888 tcp:18888
 
 配置建议使用 UTF-8 和 LF 换行。服务器会自动清理 `/prodm39` 与后续 `/` 之间误带入的 ASCII 空格、回车、换行、制表符及 `0x13` 等控制字符，日志记为 `NORMALIZE`；资源文件名与查询参数不会被改写。仅对已经到达服务器的请求生效，域名、端口错误或客户端直接拒绝的 URL 仍需修正配置。
 
-服务启动后立即检查更新，之后默认每 24 小时检查一次；只有构建输入变化才重新编码。更新在独立工作进程完成，校验成功后自动切换。发现客户端请求尚未适配的新版清单时，新请求统一使用官方资源，避免新版官方清单配上旧补丁；这个回源状态在服务重启后仍然保留。构建完成后，客户端重新读取对应补丁清单/标记才恢复补丁下载，必要时重启游戏。更新失败时保留旧构建；若已发现新版，则继续使用官方资源。`--update-interval` 可调整间隔秒数，`--no-update` 只提供资源。
+服务启动后立即检查更新，之后默认每 24 小时兜底，并在北京时间周四 16:00、18:00 检查；不依赖服务器时区。更新任务串行，运行期间错过的定点检查会在结束后补查一次。`--update-interval` 调整日常间隔秒数，`--no-update` 关闭全部自动检查。
 
-Bundle 下载地址本身不带清单版本，因此回源状态按服务整体切换，适合同一国服版本的客户端；不承诺多设备跨版本同时下载的会话隔离。已发现新版后，迟到的旧版清单请求可能返回 409，此时重启游戏刷新。历史构建只保护已开始的下载，不再作为新请求的补丁兜底。`/health` 的 `resource_mode` 表示 `patch` 或 `official`，并列出已发现及已适配的资源版本。
+首次请求新版本清单时，服务先获取该版官方清单：国服原包内容未变、旧补丁完整且规则兼容的条目继续使用旧补丁，其余先使用官方包；立绘纹理与图集骨骼成组复用或回退。清单记录始终与实际下载文件一致。这个快速步骤不触发全量扫描，暂沿用最近成功构建的日服素材；素材更新由定时任务处理。旧报告缺少原包 MD5 时，会用保留的国服原包缓存与报告 SHA256 验证兼容性。获取新清单失败返回 503 重试，不猜测发布。
+
+后台完整构建通过校验后先待发布，客户端下次请求 `bundleDownloadInfo.hash` 时统一切换，随后 JSON 请求不会再次切换；重启恢复最后已发布快照。Bundle 地址不带版本，因此仍按服务整体发布，适合同一版本和发布批次的客户端；不承诺多设备跨版本或跨批次下载的会话隔离。迟到的旧版清单可能返回 409，此时重启游戏。`/health` 的 `resource_mode` 为 `patch`（完整补丁）、`mixed`（兼容清单）或 `official`，`ready_resource_versions` 列出后台已准备、待发布的版本。
 
 服务优先提供本地补丁，缺失资源通过 HTTP 302 跳转至报告记录的国服 CDN，由游戏直接下载，避免官方大包占用服务器带宽并超时重试；日志中的 `PATCH` / `REDIRECT` 表示来源。客户端若不支持跳转，可加 `--stream-official` 恢复服务器转发（日志为 `OFFICIAL`）。`--proxy` 用于更新及兼容模式回源，不影响客户端直连 CDN。支持 GET、HEAD 和补丁单段断点下载。前台运行按 Ctrl+C 停止；后台实例 PID 位于 `.cache/local-server/pid.txt`，请求日志为 `service.log`，更新日志为 `update.log`，两者均限制大小并轮转。`/health` 可查看当前构建和更新状态。
 
@@ -94,7 +98,7 @@ Bundle 下载地址本身不带清单版本，因此回源状态按服务整体�
 
 ## Docker Compose 部署
 
-使用 Linux x86_64 服务器和 Docker Compose v2，本机 Docker Desktop 也可测试。在项目根目录执行 `docker compose up -d --build`；无需先在宿主机安装 Python。首次没有成功报告时会先下载、扫描和构建，初始化完成前端口尚未开放，进度用 `docker compose logs -f resources` 查看。服务启动后立即检查更新，之后每 24 小时检查一次并自动清理，无需另设定时任务或依赖 GitHub Actions。
+使用 Linux x86_64 服务器和 Docker Compose v2，本机 Docker Desktop 也可测试。在项目根目录执行 `docker compose up -d --build`；无需先在宿主机安装 Python。首次没有成功报告时会先下载、扫描和构建，初始化完成前端口尚未开放，进度用 `docker compose logs -f resources` 查看。服务内置每日兜底和北京时间周四 16:00、18:00 检查及自动清理，无需另设定时任务或依赖 GitHub Actions。
 
 Ubuntu 首次部署先按 [Docker 官方说明](https://docs.docker.com/engine/install/ubuntu/) 安装 Engine 和 Compose 插件，用 `uname -m` 确认架构为 `x86_64`。提交并推送本地改动后，在服务器执行：
 

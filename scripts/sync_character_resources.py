@@ -8,7 +8,6 @@ import hashlib
 import json
 import shutil
 import sys
-import zlib
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -20,6 +19,7 @@ from PIL import __version__ as pillow_version
 from character_patch import export_assets, find_assets, group_assets_by_bundle, patch_bundle
 from replaceTexture2D import normalize_bundle_name
 from resource_sources import ROOT_DIR, create_session, download_file, download_jp, fetch_cn_catalog, fetch_jp_catalog, ensure_jp_bundles, save_json, sha256_file
+from patch_reuse import builder_signature, bundle_input_fingerprint, reuse_built_bundle, write_catalog
 
 
 def workspace_path(value: str | Path) -> Path:
@@ -99,7 +99,7 @@ def build_fingerprint(config: Path, cache: Path, groups) -> str:
     entries = read_jp_catalog(cache / "jp-catalog.bytes")
     source = json.loads((cache / "cn-source.json").read_text(encoding="utf-8"))
     inputs = {
-        "builder_version": 3, "config": sha256_file(config),
+        "builder_version": 4, "builder": builder_signature(), "config": sha256_file(config),
         "cn_catalog": sha256_file(cache / "cn-catalog.json"), "cn_source": source,
         "jp_bundles": sorted((entry["Name"], entry["Size"], entry["Crc"]) for entry in entries
                              if normalize_bundle_name(Path(entry["Name"])) in groups),
@@ -109,12 +109,13 @@ def build_fingerprint(config: Path, cache: Path, groups) -> str:
 
 def build_bundle_job(job: tuple) -> dict:
     """独立加载并构建一个国服包，使贴图编码可在多个进程间并行。"""
-    original, source_files, keys, output, previews = job
+    original, source_files, keys, output, previews, metadata = job
     source_assets = find_assets(source_files, keys)
     print(f"[BUILD] {original.name}", flush=True)
     result = patch_bundle(original, source_assets, keys, output, previews)
     with output.open("rb") as stream:
         result["md5"] = hashlib.file_digest(stream, "md5").hexdigest()
+    result.update(metadata)
     return result
 
 
@@ -153,6 +154,7 @@ def run(args) -> dict:
         "output_dir": output.relative_to(ROOT_DIR).as_posix(),
         "bundles": [],
         "source_assets": [],
+        "builder_signature": builder_signature(),
     }
 
     # 1. 获取版本一致的日服快照和国服官方清单；离线模式只重放缓存。
@@ -171,18 +173,22 @@ def run(args) -> dict:
     catalog = copy.deepcopy(cn_catalog)
     entries = {item["Name"]: item for item in catalog["BundleFiles"]}
     cn_cache = cache / "cn" / cn_metadata["resource_version"]
-    source_files_by_group = {}
-    targets = {}
     source_records = []
+    previous_path = workspace_path(args.report)
+    previous_report = json.loads(previous_path.read_text(encoding="utf-8")) if previous_path.exists() else {}
+    previous_bundles = {item["name"]: item for item in previous_report.get("bundles", [])}
+    jp_by_group, cn_by_group = {}, {}
+    for path in jp_dir.glob("*.bundle"):
+        jp_by_group.setdefault(normalize_bundle_name(path), []).append(path)
+    for entry in catalog["BundleFiles"]:
+        cn_by_group.setdefault(normalize_bundle_name(Path(entry["Name"])), []).append(entry)
+    jobs, reused, digests = [], [], {}
 
     # 2. 按资源组、对象名称和皮肤配置建立对应关系，缺项时停止。
     for group, required in groups.items():
         print(f"[MATCH] {group}", flush=True)
-        jp_files = [path for path in jp_dir.glob("*.bundle") if normalize_bundle_name(path) == group]
-        cn_entries = [item for item in catalog["BundleFiles"] if normalize_bundle_name(Path(item["Name"])) == group]
-        source_files_by_group[group] = jp_files
-        source_assets = find_assets(jp_files, required)
-        cn_entries = [item for item in catalog["BundleFiles"] if normalize_bundle_name(Path(item["Name"])) == group]
+        jp_files = jp_by_group.get(group, [])
+        cn_entries = cn_by_group.get(group, [])
         if not cn_entries:
             raise RuntimeError(f"国服尚无对应资源组: {group}")
         cn_files = []
@@ -217,32 +223,40 @@ def run(args) -> dict:
                     size=entry["Size"],
                 )
             cn_files.append(target)
-        targets[group] = find_assets(cn_files, required)
+        # 常见的一组一包可直接按输入摘要复用，无需先重复解包所有纹理。
+        targets = {cn_files[0]: required} if len(cn_files) == 1 else group_assets_by_bundle(find_assets(cn_files, required))
+        for original, keys in targets.items():
+            fingerprint = bundle_input_fingerprint(original, jp_files, keys, digests)
+            generated = output / "AssetBundles/Android" / original.name
+            result = reuse_built_bundle(previous_report, previous_bundles.get(original.name), fingerprint, generated, root=ROOT_DIR)
+            metadata = {"input_fingerprint": fingerprint, "original_md5": entries[original.name]["Crc"].lower(),
+                        "original_size": entries[original.name]["Size"]}
+            if result:
+                result.update(metadata)
+                reused.append(result)
+                print(f"[REUSE] {original.name}", flush=True)
+            else:
+                jobs.append((original, jp_files, keys, generated, output.parent / "previews", metadata))
         # 正常服务构建直接读原包；只有显式导出时才生成额外 PNG 和来源台账。
         if args.apply:
+            source_assets = find_assets(jp_files, required)
             records = export_assets(source_assets, stage / group)
             for record in records:
                 record["replacement_file"] = f"replacement/{group}/{record['filename']}"
             source_records.extend(records)
 
     # 3. 立绘与画像统一按对象写入国服原包，保留内部标识及未选内容。
-    jobs = []
-    for group in source_files_by_group:
-        for original, keys in group_assets_by_bundle(targets[group]).items():
-            generated = output / "AssetBundles/Android" / original.name
-            jobs.append((original, source_files_by_group[group], keys, generated, output.parent / "previews"))
     workers = getattr(args, "workers", 4)
     # 工作进程只写各自的资源包，主进程收齐校验结果后才生成清单。
-    with ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext(None) as pool:
+    for result in reused:
+        entries[result["name"]].update(Crc=result["md5"], Size=result["size"])
+        report["bundles"].append(result)
+    with ProcessPoolExecutor(max_workers=workers) if workers > 1 and jobs else nullcontext(None) as pool:
         results = pool.map(build_bundle_job, jobs) if pool else map(build_bundle_job, jobs)
         for result in results:
             entries[result["name"]].update(Crc=result["md5"], Size=result["size"])
             report["bundles"].append(result)
-    catalog_dir = output / "AssetBundles/Catalog" / cn_metadata["resource_version"] / "Android"
-    catalog_path = catalog_dir / "bundleDownloadInfo.json"
-    save_json(catalog_path, catalog)
-    # 沿用原项目的数字更新标记格式，用确定性值表示本次清单；它不是安全校验值。
-    (catalog_dir / "bundleDownloadInfo.hash").write_text(str(zlib.crc32(catalog_path.read_bytes())), encoding="utf-8")
+    write_catalog(output, cn_metadata["resource_version"], catalog)
     for result in report["bundles"]:
         entry = entries[result["name"]]
         if entry["Crc"] != result["md5"] or entry["Size"] != result["size"]:
@@ -252,13 +266,14 @@ def run(args) -> dict:
         structural_validation_passed=True,
         preview_dir=(output.parent / "previews").relative_to(ROOT_DIR).as_posix(),
         staged_replacement_dir=stage.relative_to(ROOT_DIR).as_posix() if stage.exists() else None,
+        build_stats={"reused_bundles": len(reused), "rebuilt_bundles": len(jobs), "official_bundles": 0},
         validation_scope="国服内部标识和未选对象保持；日服图集骨架无损写入、纹理尺寸和格式校验；游戏内显示待验证",
     )
     if args.apply:
         apply_sources(stage, source_records, report, cache)
     save_json(output.parent / "report.json", report)
     save_json(workspace_path(args.report), report)
-    print(f"[DONE] 校验通过，生成 {len(report['bundles'])} 个国服补丁包；游戏客户端验证尚未执行。", flush=True)
+    print(f"[DONE] 校验通过，共 {len(report['bundles'])} 个补丁包，复用 {len(reused)}、重建 {len(jobs)}；游戏客户端验证尚未执行。", flush=True)
     print(f"[OUTPUT] {output}")
     print(f"[REPORT] {workspace_path(args.report)}")
     return report

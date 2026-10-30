@@ -8,6 +8,7 @@ import mimetypes
 import re
 import sys
 import subprocess
+from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,7 @@ import requests
 
 from sync_character_resources import workspace_path
 from resource_sources import ROOT_DIR, save_json
+from patch_reuse import prepare_compatible_patch
 
 
 class ResourceServer(ThreadingHTTPServer):
@@ -31,6 +33,8 @@ class ResourceServer(ThreadingHTTPServer):
         self.proxy = proxy
         self.stream_official = stream_official
         self.lock = Lock()
+        self.prepare_lock = Lock()
+        self.pending_report = None
         self.history = []
         self.in_use = {}
         self.active_file = active_file
@@ -80,15 +84,63 @@ class ResourceServer(ThreadingHTTPServer):
 
     def protected_outputs(self):
         """保留当前、上一版和尚有请求使用的快照目录。"""
-        return {self.directory, *(path for path, _ in self.history), *self.in_use}
+        pending = {workspace_path(self.pending_report["output_dir"])} if self.pending_report else set()
+        return {self.directory, *(path for path, _ in self.history), *self.in_use, *pending}
 
     def persist_active(self):
         """保存清理保护目录，使独立清理命令也不会删除正在使用的版本。"""
         if self.active_file:
             save_json(self.active_file, {"requested_version": self.requested_version,
                 "official_mode": self.official_mode,
+                "output_dir": self.directory.relative_to(ROOT_DIR).as_posix(),
                 "protected_outputs": [path.relative_to(ROOT_DIR).as_posix()
                 for path in sorted(self.protected_outputs())]})
+
+    def stage_update(self, report):
+        """后台产物先待发布，客户端重新读取配套清单时才切换文件。"""
+        directory = workspace_path(report["output_dir"])
+        if not report.get("structural_validation_passed") or not directory.is_dir():
+            raise ValueError("更新产物未通过校验")
+        with self.lock:
+            if directory != self.directory and (self.requested_version is None or
+                    report["cn_source"]["resource_version"] >= self.requested_version):
+                self.pending_report = report
+                self.persist_active()
+
+    def prepare_catalog(self, version, primary):
+        """首次访问新版本时只生成兼容清单，不等待纹理重新编码。"""
+        with self.prepare_lock:
+            with self.lock:
+                if self.requested_version and version < self.requested_version:
+                    return
+                pending = self.pending_report
+            if primary and pending and version in self.read_catalog_versions(workspace_path(pending["output_dir"])):
+                self.activate(pending)
+                with self.lock:
+                    self.pending_report = None
+                    self.persist_active()
+            if version in self.catalog_versions[self.directory]:
+                return
+            # 没有可追溯报告时维持原有官方回退，不能凭文件名猜测兼容性。
+            with self.lease() as snapshots:
+                directory, upstream = snapshots[0]
+                path = directory.parent / "report.json"
+                if not path.is_file():
+                    return
+                previous = json.loads(path.read_text(encoding="utf-8"))
+                if not previous.get("structural_validation_passed") or workspace_path(previous["output_dir"]) != directory:
+                    return
+                url = f"{upstream}/AssetBundles/Catalog/{version}/Android/bundleDownloadInfo.json"
+                with requests.Session() as session:
+                    session.trust_env = False
+                    if self.proxy:
+                        session.proxies.update(http=self.proxy, https=self.proxy)
+                    response = session.get(url, timeout=(15, 60))
+                    response.raise_for_status()
+                    report = prepare_compatible_patch(previous, response.json(), version, upstream, root=ROOT_DIR)
+                self.activate(report)
+                logging.info("[COMPATIBLE] 版本 %s，复用 %s 个包，%s 个包暂用官方", version,
+                             report["build_stats"]["reused_bundles"], report["build_stats"]["official_bundles"])
 
     @contextmanager
     def lease(self):
@@ -162,6 +214,17 @@ class ResourceHandler(BaseHTTPRequestHandler):
 
     def serve(self, head: bool):
         """固定请求快照后再处理路径和正文。"""
+        path = normalize_resource_path(urlsplit(self.path).path)
+        catalog = re.fullmatch(r"/prodm39/AssetBundles/Catalog/(\d{12})/Android/([^/]+)", path)
+        if catalog:
+            try:
+                # 只在标记请求发布待更新快照，避免 hash 与随后 JSON 请求之间切换。
+                self.server.prepare_catalog(catalog[1], catalog[2] == "bundleDownloadInfo.hash")
+            except (requests.RequestException, OSError, ValueError, KeyError):
+                # 新清单取不到时让客户端重试，不发布无法证明配套的旧补丁。
+                logging.exception("[CATALOG ERROR] 无法准备版本 %s", catalog[1])
+                self.send_error(503, "Resource catalog preparation failed; retry later")
+                return
         with self.server.lease() as snapshots:
             self.snapshots = snapshots
             self.directory, self.upstream = snapshots[0]
@@ -180,13 +243,21 @@ class ResourceHandler(BaseHTTPRequestHandler):
             with self.server.lock:
                 requested_version = self.server.requested_version
                 official_mode = self.server.official_mode
+                pending = self.server.pending_report
             versions = self.server.catalog_versions[self.directory]
+            report_file = self.directory.parent / "report.json"
+            snapshot = json.loads(report_file.read_text(encoding="utf-8")) if report_file.is_file() else {}
+            prepared_mode = "mixed" if snapshot.get("partial") else "patch"
+            if snapshot.get("partial") and not snapshot.get("bundles"):
+                prepared_mode = "official"
             content = json.dumps({"run_id": self.directory.parent.name,
                 "update_status": self.server.update_status,
                 "update_interval_seconds": self.server.update_interval,
                 "requested_resource_version": requested_version,
                 "patch_resource_versions": sorted(versions),
-                "resource_mode": "patch" if versions and not official_mode and (requested_version is None or requested_version in versions)
+                "ready_resource_versions": sorted(self.server.read_catalog_versions(workspace_path(pending["output_dir"])))
+                    if pending else [],
+                "resource_mode": prepared_mode if versions and not official_mode and (requested_version is None or requested_version in versions)
                     else "official"}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -304,11 +375,42 @@ class ResourceHandler(BaseHTTPRequestHandler):
         logging.info("%s %s", self.client_address[0], message % args)
 
 
+def next_weekly_check(now):
+    """计算北京时间下一个周四 16 点或 18 点，不依赖宿主机时区。"""
+    beijing = now.astimezone(timezone(timedelta(hours=8)))
+    thursday = beijing.date() + timedelta(days=(3 - beijing.weekday()) % 7)
+    for days in (0, 7):
+        for hour in (16, 18):
+            candidate = datetime.combine(thursday + timedelta(days=days), datetime.min.time(), beijing.tzinfo).replace(hour=hour)
+            if candidate > beijing:
+                return candidate.astimezone(timezone.utc)
+
+
+def restore_active_report(latest, active_path):
+    """重启恢复最后实际发布的快照，避免待发布构建中途替换客户端文件。"""
+    if active_path.exists():
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+        if active.get("output_dir"):
+            directory = workspace_path(active["output_dir"])
+            path = directory.parent / "report.json"
+            if path.is_file():
+                report = json.loads(path.read_text(encoding="utf-8"))
+                if report.get("structural_validation_passed") and workspace_path(report["output_dir"]) == directory:
+                    return report
+    return latest
+
+
+def update_wait_seconds(interval, started, finished):
+    """兼顾日常间隔和周四检查，运行期间错过的检查只补一次。"""
+    return min(interval, max(0, (next_weekly_check(started) - finished).total_seconds()))
+
+
 def update_loop(server, args, stop):
     """独立工作进程完成更新，HTTP 服务持续响应；失败时保持当前版本。"""
     from resource_maintenance import cleanup, pipeline_lock
     log = ROOT_DIR / ".cache/local-server/update.log"
     while not stop.is_set():
+        started = datetime.now(timezone.utc)
         try:
             server.update_status = "checking"
             # 工作进程日志只在两轮更新之间轮转，不影响正在写日志的子进程。
@@ -327,7 +429,7 @@ def update_loop(server, args, stop):
             if result.returncode:
                 raise RuntimeError(f"更新进程退出 {result.returncode}，详见 {log}")
             report = json.loads((ROOT_DIR / "reports/character-resources.json").read_text(encoding="utf-8"))
-            server.activate(report)
+            server.stage_update(report)
             if not args.no_cleanup:
                 with pipeline_lock(), server.lock:
                     cleaned = cleanup(protect=server.protected_outputs(), keep_previews=args.keep_previews, apply=True)
@@ -337,7 +439,9 @@ def update_loop(server, args, stop):
         except Exception:
             server.update_status = "failed"
             logging.exception("[UPDATE] 更新或清理失败；当前服务继续运行")
-        if stop.wait(args.update_interval):
+        # 日常每 24 小时兜底；构建跨过周四检查时刻时，结束后补查一次。
+        delay = update_wait_seconds(args.update_interval, started, datetime.now(timezone.utc))
+        if stop.wait(delay):
             break
 
 
@@ -349,7 +453,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18888)
     parser.add_argument("--proxy")
     parser.add_argument("--stream-official", action="store_true", help="兼容模式：经服务器转发官方资源，默认跳转 CDN")
-    parser.add_argument("--update-interval", type=float, default=86400, help="自动更新间隔（秒），默认每天")
+    parser.add_argument("--update-interval", type=float, default=86400, help="日常更新间隔（秒），另在北京时间周四 16/18 点检查")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--no-update", action="store_true", help="仅提供资源，不启动自动更新")
     parser.add_argument("--no-cleanup", action="store_true", help="保留所有生成文件")
@@ -369,7 +473,8 @@ def main() -> int:
         with pipeline_lock():
             update_resources(args.proxy, args.workers)
         report_path = ROOT_DIR / "reports/character-resources.json"
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    latest = json.loads(report_path.read_text(encoding="utf-8"))
+    report = restore_active_report(latest, log_dir / "active.json")
     directory = workspace_path(report["output_dir"])
     if not directory.is_dir() or not report.get("structural_validation_passed"):
         raise ValueError("没有可提供的成功补丁构建，请先执行扫描构建。")
@@ -384,6 +489,7 @@ def main() -> int:
                 server.history = [(previous_dir, previous["cn_source"]["root_url"].rstrip("/"))]
                 break
         server.activate(report)
+        server.stage_update(latest)
         server.update_interval = None if args.no_update else args.update_interval
         print(f"[READY] http://{args.host}:{args.port}/prodm39", flush=True)
         print(f"[BUILD] {report['run_id']}；国服资源版本 {report['cn_source']['resource_version']}", flush=True)
